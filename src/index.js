@@ -139,10 +139,18 @@ async function safeRespond(interaction, payload) {
 async function ensureDeferred(interaction) {
   try {
     if (!interaction.deferred && !interaction.replied) {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      await interaction.deferReply({ ephemeral: true });
     }
     return true;
-  } catch {
+  } catch (err) {
+    console.error("ensureDeferred failed:", err);
+    try {
+      if (!interaction.deferred && !interaction.replied) {
+        await interaction.deferReply();
+      }
+    } catch (err2) {
+      console.error("ensureDeferred fallback failed:", err2);
+    }
     return false;
   }
 }
@@ -426,11 +434,10 @@ async function runPageList(interaction, workspaceId, search, pageNum) {
   ]);
 
   if (total === 0) {
-    return safeRespond(interaction, {
-      content: s ? "No pages found for that search." : "No pages yet.",
-      components: [],
-    });
-  }
+	return safeRespond(interaction, {
+    content: "This command only works inside a server.",
+    ephemeral: true,
+});
 
   const ctx = await buildPermContext(
     interaction,
