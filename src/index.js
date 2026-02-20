@@ -11,6 +11,7 @@ import {
   TextInputStyle,
   PermissionFlagsBits,
   MessageFlags,
+  EmbedBuilder,
 } from "discord.js";
 import { PrismaClient, Prisma } from "@prisma/client";
 
@@ -817,18 +818,60 @@ await refreshSearchVector(page.id);
       }
 
       if (interaction.commandName === "help") {
-        const msg = [
-          "Commands",
-          "",
-          "/page-create title content",
-          "/page-open query",
-          "/page-list [search]",
-        ].join("\n");
-        return interaction.reply(ephemeralPayload({ content: trimForDiscord(msg, 1900) })).catch(() => {});
-      }
-
-      
-      if (interaction.commandName === "page-rename") {
+        const embed = new EmbedBuilder()
+          .setTitle("Notes Bot Help")
+          .setDescription("A lightweight Notion/Obsidian-style notes bot for Discord.")
+          .addFields(
+            {
+              name: "Working commands",
+              value: [
+                "**Pages**",
+                "• `/page-create title content` — Create a page",
+                "• `/page-open query` — Open a page by title/slug (and edit from the UI)",
+                "• `/page-list [search]` — List pages (optionally filter)",
+                "• `/page-delete query` — Delete a page",
+                "• `/page-rename query title [keep_slug]` — Rename a page",
+                "• `/page-move query destination` — Move a page under another page (folder)",
+                "",
+                "**Knowledge**",
+                "• `/backlinks query` — Pages that link to this page",
+                "",
+                "**Import / Export**",
+                "• `/export` — Export workspace to JSON",
+                "• `/import data` — Import JSON export",
+                "",
+                "**Productivity**",
+                "• `/tag-add query tags` — Add tags to a page",
+                "• `/tag-remove query tags` — Remove tags from a page",
+                "• `/tag-list` — List tags",
+                "• `/search query` — Search pages",
+                "• `/daily` — Open or create today's daily note",
+                "• `/template-create name content` — Save a template",
+                "• `/template-use name title` — Create a page from a template",
+                "",
+                "**Permissions**",
+                "• `/perm-set ...` — Set a rule",
+                "• `/perm-list` — List rules",
+                "• `/perm-clear ...` — Remove rules",
+                "",
+                "**History**",
+                "• `/page-history query` — List versions",
+                "• `/page-rollback query version` — Roll back to a version",
+              ].join("
+").slice(0, 1024),
+              inline: false,
+            },
+            {
+              name: "Planned (not implemented yet)",
+              value: [
+                "• `none`",
+              ].join("
+"),
+              inline: false,
+            }
+          );
+        return safeReply(interaction, ephemeralPayload({ embeds: [embed] }));
+      }if (interaction.commandName === "page-rename") {
         if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
         const query = interaction.options.getString("query", true);
         const newTitle = String(interaction.options.getString("title", true)).trim().slice(0, 100);
