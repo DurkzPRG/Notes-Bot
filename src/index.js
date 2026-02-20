@@ -14,7 +14,7 @@ import {
 } from "discord.js";
 import { PrismaClient, Prisma } from "@prisma/client";
 
-console.log("BOOT: src/index.js LOADED | v=all-fixes-1");
+console.log("BOOT: src/index.js LOADED | v=all-fixes-2");
 
 
 
@@ -358,9 +358,6 @@ processedInteractions.set(interaction.id, Date.now());
   } catch (e) {
     console.error("INTERACTION LOG FAILED:", e);
   }
-const _seenTs = processedInteractions.get(interaction.id);
-if (_seenTs) return;
-processedInteractions.set(interaction.id, Date.now());
 
 
 
