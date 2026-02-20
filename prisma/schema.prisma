@@ -8,8 +8,11 @@ datasource db {
 }
 
 model Workspace {
-  id        String   @id
+  id        String   @id @default(cuid())
+  guildId   String   @unique
+  name      String   @default("")
   createdAt DateTime @default(now())
+
   pages     Page[]
   perms     PermissionRule[]
   templates Template[]
@@ -21,7 +24,7 @@ model Page {
   title        String
   slug         String
   contentMd    String   @default("")
-  tags         String[]  @default([])
+  tags         String[] @default([])
   version      Int      @default(1)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt

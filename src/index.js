@@ -40,9 +40,29 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const prisma = new PrismaClient({ log: ["error", "warn"] });
 
 
-async function ensureWorkspace(_workspaceId) {
-  return;
+const workspaceIdCache = globalThis.__workspaceIdCache ?? new Map();
+globalThis.__workspaceIdCache = workspaceIdCache;
+
+async function ensureWorkspace(guildId, guildName) {
+  if (!guildId) throw new Error("Missing guildId");
+  const cached = workspaceIdCache.get(guildId);
+  if (cached) return cached;
+
+  const ws = await withTimeout(
+    prisma.workspace.upsert({
+      where: { guildId },
+      update: { name: String(guildName || "").slice(0, 120) },
+      create: { guildId, name: String(guildName || "").slice(0, 120) },
+      select: { id: true },
+    }),
+    8000,
+    "ensureWorkspace/upsert"
+  );
+
+  workspaceIdCache.set(guildId, ws.id);
+  return ws.id;
 }
+
 
 function withTimeout(promise, ms, label) {
   let t;
@@ -93,24 +113,24 @@ function formatDateInTz(date, timeZone) {
   return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
-async function getPageByQuery(workspaceId, query) {
+async function getPageByQuery(workspaceDbId, query) {
   const q = String(query || "").trim();
   if (!q) return null;
   if (looksLikeSlug(q)) {
-    return withTimeout(prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId, slug: q } } }), 8000, "getPageByQuery/slug").catch(() => null);
+    return withTimeout(prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId: workspaceDbId, slug: q } } }), 8000, "getPageByQuery/slug").catch(() => null);
   }
   return withTimeout(
-    prisma.page.findFirst({ where: { workspaceId, title: { equals: q, mode: "insensitive" } }, orderBy: { updatedAt: "desc" } }),
+    prisma.page.findFirst({ where: { workspaceId: workspaceDbId, title: { equals: q, mode: "insensitive" } }, orderBy: { updatedAt: "desc" } }),
     8000,
     "getPageByQuery/title"
   ).catch(() => null);
 }
 
-async function listMatchingPermissionRules(workspaceId, pageId, channelId, roleIds) {
+async function listMatchingPermissionRules(workspaceDbId, pageId, channelId, roleIds) {
   return withTimeout(
     prisma.permissionRule.findMany({
       where: {
-        workspaceId,
+        workspaceId: workspaceDbId,
         OR: [{ pageId: null }, { pageId: pageId || null }],
         AND: [{ OR: [{ channelId: null }, { channelId: channelId || null }] }, { roleId: { in: roleIds || [] } }],
       },
@@ -121,7 +141,7 @@ async function listMatchingPermissionRules(workspaceId, pageId, channelId, roleI
   ).catch(() => []);
 }
 
-async function canAccess(interaction, workspaceId, pageId, mode) {
+async function canAccess(interaction, workspaceDbId, pageId, mode) {
   if (isAdmin(interaction)) return true;
   const channelId = interaction.channelId || null;
   const roleIds = Array.isArray(interaction.member?.roles?.valueOf?.())
@@ -131,7 +151,7 @@ async function canAccess(interaction, workspaceId, pageId, mode) {
       : Array.isArray(interaction.member?.roles?.cache?.map)
         ? interaction.member.roles.cache.map((r) => r.id)
         : [];
-  const rules = await listMatchingPermissionRules(workspaceId, pageId || null, channelId, roleIds);
+  const rules = await listMatchingPermissionRules(workspaceDbId, pageId || null, channelId, roleIds);
   if (!rules.length) return true;
   if (mode === "read") return rules.some((r) => r.canRead);
   return rules.some((r) => r.canWrite);
@@ -246,7 +266,7 @@ async function safeDeferUpdate(interaction) {
 
 
 
-function makeListKey(workspaceId, search, pageNum) {
+function makeListKey(guildId, search, pageNum) {
   const s = (search || "").trim();
   const p = clampInt(pageNum || 1, 1, 1000);
   return `pl|${workspaceId}|${encodeURIComponent(s)}|${p}`;
@@ -262,7 +282,7 @@ function parseListKey(customId) {
   return { workspaceId, search, pageNum: Number.isFinite(pageNum) ? pageNum : 1 };
 }
 
-function openKey(workspaceId, slug) {
+function openKey(guildId, slug) {
   return `po|${workspaceId}|${slug}`;
 }
 function parseOpenKey(customId) {
@@ -271,10 +291,10 @@ function parseOpenKey(customId) {
   if (parts.length !== 3) return null;
   return { workspaceId: parts[1], slug: parts[2] };
 }
-function editKey(workspaceId, slug) {
+function editKey(guildId, slug) {
   return `pe|${workspaceId}|${slug}`;
 }
-function delKey(workspaceId, slug) {
+function delKey(guildId, slug) {
   return `pd|${workspaceId}|${slug}`;
 }
 function delConfirmKey(workspaceId, slug) {
@@ -326,7 +346,7 @@ async function refreshSearchVector(pageId) {
   }
 }
 
-async function renderPageOpen(workspaceId, page) {
+async function renderPageOpen(guildId, page) {
   const meta = [
     `version: ${page.version}`,
     `updated: ${new Date(page.updatedAt).toISOString().slice(0, 19).replace("T", " ")}`,
@@ -336,22 +356,22 @@ async function renderPageOpen(workspaceId, page) {
   const text = `${page.title} (slug: ${page.slug})\n\n${meta}\n\n${content}`;
 
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(editKey(workspaceId, page.slug)).setLabel("Edit").setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(delKey(workspaceId, page.slug)).setLabel("Delete").setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId(openKey(workspaceId, page.slug)).setLabel("Refresh").setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId(editKey(guildId, page.slug)).setLabel("Edit").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(delKey(guildId, page.slug)).setLabel("Delete").setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(openKey(guildId, page.slug)).setLabel("Refresh").setStyle(ButtonStyle.Secondary)
   );
 
   return { content: trimForDiscord(text, 1900), components: [row] };
 }
 
-async function runPageList(interaction, workspaceId, search, pageNum) {
+async function runPageList(interaction, guildId, workspaceDbId, search, pageNum) {
   const take = 10;
   const p = clampInt(pageNum || 1, 1, 1000);
   const skip = (p - 1) * take;
   const s = (search || "").trim();
 
   const where = {
-    workspaceId,
+    workspaceId: workspaceDbId,
     ...(s
       ? {
           OR: [
@@ -392,8 +412,8 @@ async function runPageList(interaction, workspaceId, search, pageNum) {
 
   const prevPage = Math.max(1, current - 1);
   const nextPage = Math.min(totalPages, current + 1);
-  const prevId = makeListKey(workspaceId, s, prevPage);
-  const nextId = makeListKey(workspaceId, s, nextPage);
+  const prevId = makeListKey(guildId, s, prevPage);
+  const nextId = makeListKey(guildId, s, nextPage);
 
   let components = [];
 
@@ -417,13 +437,13 @@ async function runPageList(interaction, workspaceId, search, pageNum) {
 }
 
 
-async function findPageByQuery(workspaceId, query) {
+async function findPageByQuery(workspaceDbId, query) {
   const q = String(query || "").trim();
   if (!q) return null;
 
   if (looksLikeSlug(q)) {
     const bySlug = await withTimeout(
-      prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId, slug: q } } }),
+      prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId: workspaceDbId, slug: q } } }),
       8000,
       "findPageByQuery/slug"
     ).catch(() => null);
@@ -434,7 +454,7 @@ async function findPageByQuery(workspaceId, query) {
   const rows = await withTimeout(
     prisma.page.findMany({
       where: {
-        workspaceId,
+        workspaceId: workspaceDbId,
         OR: [
           { title: { equals: q, mode: "insensitive" } },
           ...(slugQ ? [{ slug: { equals: slugQ, mode: "insensitive" } }] : []),
@@ -497,6 +517,12 @@ if (interaction.isAutocomplete()) {
     return;
   }
 
+  const workspaceDbId = await ensureWorkspace(guildId, interaction.guild?.name).catch(() => null);
+  if (!workspaceDbId) {
+    await interaction.respond([]).catch(() => {});
+    return;
+  }
+
   const cmd = interaction.commandName;
   const focused = interaction.options.getFocused(true);
   const q = String(focused?.value ?? "").trim();
@@ -518,14 +544,14 @@ if (interaction.isAutocomplete()) {
   ) {
     const where = q
       ? {
-          workspaceId: guildId,
+          workspaceId: workspaceDbId,
           OR: [
             { title: { contains: q, mode: "insensitive" } },
             { slug: { contains: slugify(q), mode: "insensitive" } },
             { contentMd: { contains: q, mode: "insensitive" } },
           ],
         }
-      : { workspaceId: guildId };
+      : { workspaceId: workspaceDbId };
 
     const rows = await withTimeout(
       prisma.page.findMany({
@@ -555,6 +581,12 @@ if (interaction.isAutocomplete()) {
         const guildId = interaction.guildId;
         if (!guildId) return;
 
+        const workspaceDbId = await ensureWorkspace(guildId, interaction.guild?.name).catch(() => null);
+        if (!workspaceDbId) {
+          if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
+          return safeEdit(interaction, ephemeralPayload({ content: "Database not ready.", components: [] }));
+        }
+
         
 if (interaction.customId.startsWith("pe|")) {
   const parsed = parseKey3("pe", interaction.customId);
@@ -566,7 +598,7 @@ if (interaction.customId.startsWith("pe|")) {
   }
 
   const pagePromise = withTimeout(
-    prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId: guildId, slug: parsed.slug } } }),
+    prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId: workspaceDbId, slug: parsed.slug } } }),
     1800,
     "page-edit/get"
   ).catch(() => null);
@@ -613,7 +645,7 @@ if (interaction.customId.startsWith("pl|")) {
 
           if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
           if (parsed.workspaceId !== guildId) return safeEdit(interaction, ephemeralPayload({ content: "Invalid action.", components: [] }));
-          return runPageList(interaction, guildId, parsed.search, parsed.pageNum);
+          return runPageList(interaction, guildId, workspaceDbId, parsed.search, parsed.pageNum);
         }
 
         if (interaction.customId.startsWith("po|")) {
@@ -624,7 +656,7 @@ if (interaction.customId.startsWith("pl|")) {
           if (parsed.workspaceId !== guildId) return safeEdit(interaction, ephemeralPayload({ content: "Invalid action.", components: [] }));
 
           const page = await withTimeout(
-            prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId: guildId, slug: parsed.slug } } }),
+            prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId: workspaceDbId, slug: parsed.slug } } }),
             8000,
             "page-open button"
           );
@@ -643,7 +675,7 @@ if (interaction.customId.startsWith("pd|")) {
   if (parsed.workspaceId !== guildId) return safeEdit(interaction, ephemeralPayload({ content: "Invalid action.", components: [] }));
 
   const page = await withTimeout(
-    prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId: guildId, slug: parsed.slug } } }),
+    prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId: workspaceDbId, slug: parsed.slug } } }),
     8000,
     "page-delete/get"
   ).catch(() => null);
@@ -672,7 +704,7 @@ if (interaction.customId.startsWith("pdc|")) {
   if (parsed.workspaceId !== guildId) return safeEdit(interaction, ephemeralPayload({ content: "Invalid action.", components: [] }));
 
   await withTimeout(
-    prisma.page.delete({ where: { workspaceId_slug: { workspaceId: guildId, slug: parsed.slug } } }),
+    prisma.page.delete({ where: { workspaceId_slug: { workspaceId: workspaceDbId, slug: parsed.slug } } }),
     8000,
     "page-delete/delete"
   ).catch(async (err) => {
@@ -690,6 +722,12 @@ return;
 if (interaction.isModalSubmit && interaction.isModalSubmit()) {
   const guildId = interaction.guildId;
   if (!guildId) return;
+
+  const workspaceDbId = await ensureWorkspace(guildId, interaction.guild?.name).catch(() => null);
+  if (!workspaceDbId) {
+    if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
+    return safeEdit(interaction, ephemeralPayload({ content: "Database not ready.", components: [] }));
+  }
 
   if (interaction.customId.startsWith("pem|")) {
     const parsed = parseKey3("pem", interaction.customId);
@@ -716,11 +754,11 @@ if (interaction.isModalSubmit && interaction.isModalSubmit()) {
     let updated = null;
     for (let i = 0; i < 25; i++) {
       try {
-        const current = await withTimeout(prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId: guildId, slug: parsed.slug } } }), 8000, "page-edit/current").catch(() => null);
-        if (current && (await canAccess(interaction, guildId, current.id, "write"))) await bumpPageVersion(current, interaction.user?.id);
+        const current = await withTimeout(prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId: workspaceDbId, slug: parsed.slug } } }), 8000, "page-edit/current").catch(() => null);
+        if (current && (await canAccess(interaction, workspaceDbId, current.id, "write"))) await bumpPageVersion(current, interaction.user?.id);
         updated = await withTimeout(
           prisma.page.update({
-            where: { workspaceId_slug: { workspaceId: guildId, slug: parsed.slug } },
+            where: { workspaceId_slug: { workspaceId: workspaceDbId, slug: parsed.slug } },
             data: { title: newTitle, slug, contentMd: newContent },
           }),
           8000,
@@ -762,16 +800,21 @@ if (!interaction.isChatInputCommand()) return;
       if (!guildId) {
         return interaction.reply(ephemeralPayload({ content: "This command only works inside a server." })).catch(() => {});
       }
+
+      const workspaceDbId = await ensureWorkspace(guildId, interaction.guild?.name).catch(() => null);
+      if (!workspaceDbId) {
+        return interaction.reply(ephemeralPayload({ content: "Database not ready." })).catch(() => {});
+      }
       if (interaction.commandName === "page-list") {
         if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
         const search = interaction.options.getString("search") ?? "";
-        return runPageList(interaction, guildId, search, 1);
+        return runPageList(interaction, guildId, workspaceDbId, search, 1);
       }
 
       if (interaction.commandName === "page-open") {
         if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
         const query = interaction.options.getString("query", true);
-        const page = await findPageByQuery(guildId, query);
+        const page = await findPageByQuery(workspaceDbId, query);
         if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
 
         const payload = await renderPageOpen(guildId, page);
@@ -790,7 +833,7 @@ let slug = baseSlug;
 for (let i = 0; i < 25; i++) {
   try {
     page = await withTimeout(
-      prisma.page.create({ data: { workspaceId: guildId, title, slug, contentMd: content } }),
+      prisma.page.create({ data: { workspaceId: workspaceDbId, title, slug, contentMd: content } }),
       8000,
       "page-create/create"
     );
@@ -877,7 +920,7 @@ await refreshSearchVector(page.id);
         const newTitle = String(interaction.options.getString("title", true)).trim().slice(0, 100);
         const keepSlug = Boolean(interaction.options.getBoolean("keep_slug") ?? false);
 
-        const page = await findPageByQuery(guildId, query);
+        const page = await findPageByQuery(workspaceDbId, query);
         if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
         if (!newTitle) return safeEdit(interaction, ephemeralPayload({ content: "Title cannot be empty.", components: [] }));
 
@@ -889,7 +932,7 @@ await refreshSearchVector(page.id);
             try {
               await bumpPageVersion(page, interaction.user?.id);const updated = await withTimeout(
           prisma.page.update({
-                  where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
+                  where: { workspaceId_slug: { workspaceId: workspaceDbId, slug: page.slug } },
                   data: { title: newTitle, slug },
                 }),
                 8000,
@@ -910,7 +953,7 @@ await refreshSearchVector(page.id);
         }
 await bumpPageVersion(page, interaction.user?.id);        const updated = await withTimeout(
           prisma.page.update({
-            where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
+            where: { workspaceId_slug: { workspaceId: workspaceDbId, slug: page.slug } },
             data: { title: newTitle },
           }),
           8000,
@@ -927,12 +970,12 @@ await bumpPageVersion(page, interaction.user?.id);        const updated = await 
         const folder = String(interaction.options.getString("folder", true)).trim().replace(/^\/+|\/+$/g, "");
         if (!folder) return safeEdit(interaction, ephemeralPayload({ content: "Folder cannot be empty.", components: [] }));
 
-        const page = await findPageByQuery(guildId, query);
+        const page = await findPageByQuery(workspaceDbId, query);
         if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
         const newTitle = `${folder}/${page.title}`;
 await bumpPageVersion(page, interaction.user?.id);        const updated = await withTimeout(
           prisma.page.update({
-            where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
+            where: { workspaceId_slug: { workspaceId: workspaceDbId, slug: page.slug } },
             data: { title: newTitle.slice(0, 100) },
           }),
           8000,
@@ -946,14 +989,14 @@ await bumpPageVersion(page, interaction.user?.id);        const updated = await 
       if (interaction.commandName === "backlinks") {
         if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
         const query = interaction.options.getString("query", true);
-        const target = await findPageByQuery(guildId, query);
+        const target = await findPageByQuery(workspaceDbId, query);
         if (!target) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
 
         const needles = [`[[${target.slug}]]`, `[[${target.title}]]`].filter(Boolean);
         const rows = await withTimeout(
           prisma.page.findMany({
             where: {
-              workspaceId: guildId,
+              workspaceId: workspaceDbId,
               OR: needles.map((n) => ({ contentMd: { contains: n } })),
             },
             orderBy: { updatedAt: "desc" },
@@ -974,7 +1017,7 @@ return safeEdit(interaction, ephemeralPayload({ content: trimForDiscord(text, 19
       if (interaction.commandName === "export") {
         if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
         const query = interaction.options.getString("query", true);
-        const page = await findPageByQuery(guildId, query);
+        const page = await findPageByQuery(workspaceDbId, query);
         if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
         const md = (page.contentMd || "").trim();
         const content = `# ${page.title}
@@ -987,11 +1030,11 @@ ${md}`;
         if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
         const query = interaction.options.getString("query", true);
         const content = String(interaction.options.getString("content", true));
-        const page = await findPageByQuery(guildId, query);
+        const page = await findPageByQuery(workspaceDbId, query);
         if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
 await bumpPageVersion(page, interaction.user?.id);        const updated = await withTimeout(
           prisma.page.update({
-            where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
+            where: { workspaceId_slug: { workspaceId: workspaceDbId, slug: page.slug } },
             data: { contentMd: content },
           }),
           8000,
@@ -1019,7 +1062,7 @@ if (
       ) {
         if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
 
-        const workspaceId = guildId;
+        const workspaceId = workspaceDbId;
 
         if (interaction.commandName === "tag-add") {
           const q = interaction.options.getString("query", true);
@@ -1121,7 +1164,7 @@ if (
               );
               await snapshotVersion(created, interaction.user?.id);
               await refreshSearchVector(created.id);
-              const payload = await renderPageOpen(workspaceId, created);
+              const payload = await renderPageOpen(guildId, created);
               return safeEdit(interaction, ephemeralPayload(payload));
             } catch (err) {
               if (err?.code === "P2002") slug = `${baseSlug}-${Math.floor(Math.random() * 10000)}`;
@@ -1147,7 +1190,7 @@ if (
 
           if (existing) {
             if (!(await canAccess(interaction, workspaceId, existing.id, "read"))) return safeEdit(interaction, ephemeralPayload({ content: "You don't have read access.", components: [] }));
-            const payload = await renderPageOpen(workspaceId, existing);
+            const payload = await renderPageOpen(guildId, existing);
             return safeEdit(interaction, ephemeralPayload(payload));
           }
 
@@ -1158,7 +1201,7 @@ if (
           );
           await snapshotVersion(created, interaction.user?.id);
           await refreshSearchVector(created.id);
-          const payload = await renderPageOpen(workspaceId, created);
+          const payload = await renderPageOpen(guildId, created);
           return safeEdit(interaction, ephemeralPayload(payload));
         }
 
@@ -1232,7 +1275,7 @@ if (
             "page-rollback/update"
           );
           await refreshSearchVector(updated.id);
-          const payload = await renderPageOpen(workspaceId, updated);
+          const payload = await renderPageOpen(guildId, updated);
           return safeEdit(interaction, ephemeralPayload(payload));
         }
 
