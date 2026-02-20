@@ -14,7 +14,16 @@ import {
 } from "discord.js";
 import { PrismaClient, Prisma } from "@prisma/client";
 
-console.log("BOOT: src/index.js LOADED | v=autocomplete+safeedit-fix-1");
+console.log("BOOT: src/index.js LOADED | v=delete-buttons-fix-1");
+
+
+const processedInteractions = new Map();
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, ts] of processedInteractions.entries()) {
+    if (now - ts > 60_000) processedInteractions.delete(id);
+  }
+}, 30_000).unref();
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -319,6 +328,11 @@ client.on("interactionCreate", (interaction) => {
   } catch (e) {
     console.error("INTERACTION LOG FAILED:", e);
   }
+const _seenTs = processedInteractions.get(interaction.id);
+if (_seenTs) return;
+processedInteractions.set(interaction.id, Date.now());
+
+
 
   (async () => {
     try {
@@ -417,7 +431,58 @@ if (interaction.isAutocomplete()) {
           return safeEdit(interaction, ephemeralPayload(payload));
         }
 
-        return;
+        
+// Delete page (ask for confirmation)
+if (interaction.customId.startsWith("pd|")) {
+  const parsed = parseKey3("pd", interaction.customId);
+  if (!parsed) return;
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+  if (parsed.workspaceId !== guildId) return safeEdit(interaction, ephemeralPayload({ content: "Invalid action.", components: [] }));
+
+  const page = await withTimeout(
+    prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId: guildId, slug: parsed.slug } } }),
+    8000,
+    "page-delete/get"
+  ).catch(() => null);
+
+  if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(delConfirmKey(guildId, parsed.slug)).setLabel("Confirm delete").setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(openKey(guildId, parsed.slug)).setLabel("Cancel").setStyle(ButtonStyle.Secondary)
+  );
+
+  return safeEdit(
+    interaction,
+    ephemeralPayload({
+      content: `⚠️ Delete **${page.title}**? This cannot be undone.`,
+      components: [row],
+    })
+  );
+}
+
+// Delete page (confirmed)
+if (interaction.customId.startsWith("pdc|")) {
+  const parsed = parseKey3("pdc", interaction.customId);
+  if (!parsed) return;
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+  if (parsed.workspaceId !== guildId) return safeEdit(interaction, ephemeralPayload({ content: "Invalid action.", components: [] }));
+
+  await withTimeout(
+    prisma.page.delete({ where: { workspaceId_slug: { workspaceId: guildId, slug: parsed.slug } } }),
+    8000,
+    "page-delete/delete"
+  ).catch(async (err) => {
+    if (err?.code === "P2025") return null;
+    throw err;
+  });
+
+  return safeEdit(interaction, ephemeralPayload({ content: "✅ Page deleted.", components: [] }));
+}
+
+return;
       }
 
       if (!interaction.isChatInputCommand()) return;
@@ -449,15 +514,35 @@ if (interaction.isAutocomplete()) {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const title = interaction.options.getString("title", true);
         const content = interaction.options.getString("content") ?? "";
-        const slug = slugify(title) || "page";
+        
+const baseSlug = slugify(title) || "page";
 
-        const page = await withTimeout(
-          prisma.page.create({ data: { workspaceId: guildId, title, slug, contentMd: content } }),
-          8000,
-          "page-create/create"
-        );
+let page = null;
+let slug = baseSlug;
+for (let i = 0; i < 25; i++) {
+  try {
+    page = await withTimeout(
+      prisma.page.create({ data: { workspaceId: guildId, title, slug, contentMd: content } }),
+      8000,
+      "page-create/create"
+    );
+    break;
+  } catch (err) {
+    if (err?.code === "P2002") {
+      slug = `${baseSlug}-${i + 2}`;
+      continue;
+    }
+    throw err;
+  }
+}
 
-        await refreshSearchVector(page.id);
+if (!page) {
+  return safeEdit(
+    interaction,
+    ephemeralPayload({ content: "Could not create the page (slug collision). Try a different title." })
+  );
+}
+await refreshSearchVector(page.id);
         const payload = await renderPageOpen(guildId, page);
         return safeEdit(interaction, ephemeralPayload(payload));
       }
