@@ -351,7 +351,6 @@ async function runPageList(interaction, workspaceId, search, pageNum) {
           OR: [
             { title: { contains: s, mode: "insensitive" } },
             { slug: { contains: slugify(s), mode: "insensitive" } },
-            { slug: { contains: s.toLowerCase(), mode: "insensitive" } },
             { contentMd: { contains: s, mode: "insensitive" } },
           ],
         }
@@ -365,29 +364,27 @@ async function runPageList(interaction, workspaceId, search, pageNum) {
       orderBy: { updatedAt: "desc" },
       skip,
       take,
-      select: { title: true, slug: true, updatedAt: true, id: true },
+      select: { id: true, title: true, slug: true, updatedAt: true },
     }),
   ]);
 
-  if (total === 0) {
+  if (!rows.length) {
     return safeRespond(interaction, {
-      content: s ? "No pages found for that search." : "No pages yet.",
+      content: "No pages found.",
       components: [],
     });
   }
 
-  const visible = [];
-  for (const r of rows) {
-    if (await canRead(interaction, workspaceId, r.id)) visible.push(r);
-  }
-
   const totalPages = Math.max(1, Math.ceil(total / take));
   const current = clampInt(p, 1, totalPages);
-  const start = (current - 1) * take;
-  const end = Math.min(total, start + rows.length);
 
-  const header = `Pages ${start + 1}-${end} of ${total} (page ${current}/${totalPages})` + (s ? ` | search: ${s}` : "");
-  const lines = visible.map((r, i) => `${start + i + 1}. ${r.title}  |  ${r.slug}`);
+  const header =
+    `Pages ${(skip + 1)}-${Math.min(skip + rows.length, total)} of ${total} (page ${current}/${totalPages})`
+    + (s ? ` | search: ${s}` : "");
+
+  const lines = rows.map((r, i) =>
+    `${skip + i + 1}. ${r.title}  |  ${r.slug}`
+  );
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -403,7 +400,7 @@ async function runPageList(interaction, workspaceId, search, pageNum) {
   );
 
   return safeRespond(interaction, {
-    content: trimForDiscord(`${header}\n\n${lines.join("\n") || "(no visible pages)"}`, 1900),
+    content: trimForDiscord(`${header}\n\n${lines.join("\n")}`, 1900),
     components: [row],
   });
 }
@@ -706,8 +703,8 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
-process.on("unhandledRejection", () => {});
-process.on("uncaughtException", () => {});
+process.on("unhandledRejection", (err) => console.error(err));
+process.on("uncaughtException", (err) => console.error(err));
 
 process.on("SIGINT", async () => {
   await prisma.$disconnect();
