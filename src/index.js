@@ -76,6 +76,93 @@ function looksLikeSlug(s) {
   return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(s || "");
 }
 
+
+function parseTagList(raw) {
+  return String(raw || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => s.toLowerCase())
+    .slice(0, 50);
+}
+
+function formatDateInTz(date, timeZone) {
+  const p = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+  const get = (t) => p.find((x) => x.type === t)?.value || "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+async function getPageByQuery(workspaceId, query) {
+  const q = String(query || "").trim();
+  if (!q) return null;
+  if (looksLikeSlug(q)) {
+    return withTimeout(prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId, slug: q } } }), 8000, "getPageByQuery/slug").catch(() => null);
+  }
+  return withTimeout(
+    prisma.page.findFirst({ where: { workspaceId, title: { equals: q, mode: "insensitive" } }, orderBy: { updatedAt: "desc" } }),
+    8000,
+    "getPageByQuery/title"
+  ).catch(() => null);
+}
+
+async function listMatchingPermissionRules(workspaceId, pageId, channelId, roleIds) {
+  return withTimeout(
+    prisma.permissionRule.findMany({
+      where: {
+        workspaceId,
+        OR: [{ pageId: null }, { pageId: pageId || null }],
+        AND: [{ OR: [{ channelId: null }, { channelId: channelId || null }] }, { roleId: { in: roleIds || [] } }],
+      },
+      orderBy: { createdAt: "asc" },
+    }),
+    8000,
+    "perm/listMatching"
+  ).catch(() => []);
+}
+
+async function canAccess(interaction, workspaceId, pageId, mode) {
+  if (isAdmin(interaction)) return true;
+  const channelId = interaction.channelId || null;
+  const roleIds = Array.isArray(interaction.member?.roles?.valueOf?.())
+    ? interaction.member.roles.valueOf()
+    : Array.isArray(interaction.member?.roles)
+      ? interaction.member.roles
+      : Array.isArray(interaction.member?.roles?.cache?.map)
+        ? interaction.member.roles.cache.map((r) => r.id)
+        : [];
+  const rules = await listMatchingPermissionRules(workspaceId, pageId || null, channelId, roleIds);
+  if (!rules.length) return true;
+  if (mode === "read") return rules.some((r) => r.canRead);
+  return rules.some((r) => r.canWrite);
+}
+
+async function snapshotVersion(page, authorId) {
+  if (!page) return;
+  await withTimeout(
+    prisma.pageVersion.create({
+      data: {
+        pageId: page.id,
+        version: page.version,
+        title: page.title,
+        slug: page.slug,
+        contentMd: page.contentMd || "",
+        authorId: authorId || null,
+      },
+    }),
+    8000,
+    "snapshotVersion/create"
+  ).catch(() => {});
+}
+
+async function bumpPageVersion(page, authorId) {
+  await snapshotVersion(page, authorId);
+  const updated = await withTimeout(
+    prisma.page.update({ where: { id: page.id }, data: { version: { increment: 1 } } }),
+    8000,
+    "bumpPageVersion/update"
+  );
+  return updated;
+}
 function trimForDiscord(s, max = 1900) {
   if (!s) return "";
   return s.length > max ? s.slice(0, max - 3) + "..." : s;
@@ -628,6 +715,8 @@ if (interaction.isModalSubmit && interaction.isModalSubmit()) {
     let updated = null;
     for (let i = 0; i < 25; i++) {
       try {
+        const current = await withTimeout(prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId: guildId, slug: parsed.slug } } }), 8000, "page-edit/current").catch(() => null);
+        if (current && (await canAccess(interaction, guildId, current.id, "write"))) await bumpPageVersion(current, interaction.user?.id);
         updated = await withTimeout(
           prisma.page.update({
             where: { workspaceId_slug: { workspaceId: guildId, slug: parsed.slug } },
@@ -704,6 +793,8 @@ for (let i = 0; i < 25; i++) {
       8000,
       "page-create/create"
     );
+    await snapshotVersion(page, interaction.user?.id);
+    await refreshSearchVector(page.id);
     break;
   } catch (err) {
     if (err?.code === "P2002") {
@@ -754,6 +845,7 @@ await refreshSearchVector(page.id);
           for (let i = 0; i < 25; i++) {
             try {
               const updated = await withTimeout(
+await bumpPageVersion(page, interaction.user?.id);
                 prisma.page.update({
                   where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
                   data: { title: newTitle, slug },
@@ -776,6 +868,7 @@ await refreshSearchVector(page.id);
         }
 
         const updated = await withTimeout(
+await bumpPageVersion(page, interaction.user?.id);
           prisma.page.update({
             where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
             data: { title: newTitle },
@@ -798,6 +891,7 @@ await refreshSearchVector(page.id);
         if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
         const newTitle = `${folder}/${page.title}`;
         const updated = await withTimeout(
+await bumpPageVersion(page, interaction.user?.id);
           prisma.page.update({
             where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
             data: { title: newTitle.slice(0, 100) },
@@ -857,6 +951,7 @@ ${md}`;
         const page = await findPageByQuery(guildId, query);
         if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
         const updated = await withTimeout(
+await bumpPageVersion(page, interaction.user?.id);
           prisma.page.update({
             where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
             data: { contentMd: content },
@@ -869,7 +964,8 @@ ${md}`;
         return safeEdit(interaction, ephemeralPayload(payload));
       }
 
-      if (
+      
+if (
         interaction.commandName === "tag-add" ||
         interaction.commandName === "tag-remove" ||
         interaction.commandName === "tag-list" ||
@@ -884,7 +980,292 @@ ${md}`;
         interaction.commandName === "perm-clear"
       ) {
         if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-        return safeEdit(interaction, ephemeralPayload({ content: "This command is not implemented in this build.", components: [] }));
+
+        const workspaceId = guildId;
+
+        if (interaction.commandName === "tag-add") {
+          const q = interaction.options.getString("query", true);
+          const tagsRaw = interaction.options.getString("tags", true);
+          const page = await getPageByQuery(workspaceId, q);
+          if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
+          if (!(await canAccess(interaction, workspaceId, page.id, "write"))) return safeEdit(interaction, ephemeralPayload({ content: "You don't have write access.", components: [] }));
+
+          const tags = parseTagList(tagsRaw);
+          const merged = Array.from(new Set([...(page.tags || []), ...tags])).slice(0, 100);
+          const bumped = await bumpPageVersion(page, interaction.user?.id);
+          const updated = await withTimeout(
+            prisma.page.update({ where: { id: page.id }, data: { tags: merged } }),
+            8000,
+            "tag-add/update"
+          );
+          await refreshSearchVector(updated.id);
+          return safeEdit(interaction, ephemeralPayload({ content: `OK. Tags now: ${merged.length ? merged.join(", ") : "(none)"}`, components: [] }));
+        }
+
+        if (interaction.commandName === "tag-remove") {
+          const q = interaction.options.getString("query", true);
+          const tagsRaw = interaction.options.getString("tags", true);
+          const page = await getPageByQuery(workspaceId, q);
+          if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
+          if (!(await canAccess(interaction, workspaceId, page.id, "write"))) return safeEdit(interaction, ephemeralPayload({ content: "You don't have write access.", components: [] }));
+
+          const remove = new Set(parseTagList(tagsRaw));
+          const next = (page.tags || []).filter((t) => !remove.has(String(t).toLowerCase()));
+          await bumpPageVersion(page, interaction.user?.id);
+          const updated = await withTimeout(
+            prisma.page.update({ where: { id: page.id }, data: { tags: next } }),
+            8000,
+            "tag-remove/update"
+          );
+          await refreshSearchVector(updated.id);
+          return safeEdit(interaction, ephemeralPayload({ content: `OK. Tags now: ${next.length ? next.join(", ") : "(none)"}`, components: [] }));
+        }
+
+        if (interaction.commandName === "tag-list") {
+          const search = (interaction.options.getString("search", false) || "").trim().toLowerCase();
+          const pages = await withTimeout(
+            prisma.page.findMany({ where: { workspaceId }, select: { tags: true } }),
+            8000,
+            "tag-list/pages"
+          ).catch(() => []);
+          const all = new Map();
+          for (const p of pages) {
+            for (const t of p.tags || []) {
+              const k = String(t).toLowerCase();
+              if (!k) continue;
+              all.set(k, (all.get(k) || 0) + 1);
+            }
+          }
+          let items = Array.from(all.entries()).sort((a, b) => b[1] - a[1]);
+          if (search) items = items.filter(([t]) => t.includes(search));
+          items = items.slice(0, 50);
+          const lines = items.map(([t, c]) => `${t} (${c})`);
+          return safeEdit(interaction, ephemeralPayload({ content: lines.length ? lines.join("\n") : "No tags.", components: [] }));
+        }
+
+        if (interaction.commandName === "template-create") {
+          const name = interaction.options.getString("name", true).trim().slice(0, 60);
+          const content = interaction.options.getString("content", true);
+          if (!(await canAccess(interaction, workspaceId, null, "write"))) return safeEdit(interaction, ephemeralPayload({ content: "You don't have write access.", components: [] }));
+
+          await withTimeout(
+            prisma.template.upsert({
+              where: { workspaceId_name: { workspaceId, name } },
+              update: { contentMd: content },
+              create: { workspaceId, name, contentMd: content },
+            }),
+            8000,
+            "template-create/upsert"
+          );
+          return safeEdit(interaction, ephemeralPayload({ content: `OK. Template saved: ${name}`, components: [] }));
+        }
+
+        if (interaction.commandName === "template-use") {
+          const name = interaction.options.getString("name", true).trim().slice(0, 60);
+          const title = interaction.options.getString("title", true).trim().slice(0, 100);
+          if (!(await canAccess(interaction, workspaceId, null, "write"))) return safeEdit(interaction, ephemeralPayload({ content: "You don't have write access.", components: [] }));
+
+          const tpl = await withTimeout(
+            prisma.template.findUnique({ where: { workspaceId_name: { workspaceId, name } } }),
+            8000,
+            "template-use/get"
+          ).catch(() => null);
+          if (!tpl) return safeEdit(interaction, ephemeralPayload({ content: "Template not found.", components: [] }));
+
+          const baseSlug = slugify(title);
+          let slug = baseSlug || `page-${Date.now()}`;
+          for (let i = 0; i < 20; i++) {
+            try {
+              const created = await withTimeout(
+                prisma.page.create({ data: { workspaceId, title, slug, contentMd: tpl.contentMd || "" } }),
+                8000,
+                "template-use/create"
+              );
+              await snapshotVersion(created, interaction.user?.id);
+              await refreshSearchVector(created.id);
+              const payload = await renderPageOpen(workspaceId, created);
+              return safeEdit(interaction, ephemeralPayload(payload));
+            } catch (err) {
+              if (err?.code === "P2002") slug = `${baseSlug}-${Math.floor(Math.random() * 10000)}`;
+              else throw err;
+            }
+          }
+          return safeEdit(interaction, ephemeralPayload({ content: "Could not create page (slug collision).", components: [] }));
+        }
+
+        if (interaction.commandName === "daily") {
+          const dateRaw = (interaction.options.getString("date", false) || "").trim();
+          const tz = "America/Cuiaba";
+          const date = dateRaw && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw) ? dateRaw : formatDateInTz(new Date(), tz);
+          const title = `daily/${date}`;
+          const slug = `daily-${date}`;
+          if (!(await canAccess(interaction, workspaceId, null, "write"))) return safeEdit(interaction, ephemeralPayload({ content: "You don't have write access.", components: [] }));
+
+          const existing = await withTimeout(
+            prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId, slug } } }),
+            8000,
+            "daily/get"
+          ).catch(() => null);
+
+          if (existing) {
+            if (!(await canAccess(interaction, workspaceId, existing.id, "read"))) return safeEdit(interaction, ephemeralPayload({ content: "You don't have read access.", components: [] }));
+            const payload = await renderPageOpen(workspaceId, existing);
+            return safeEdit(interaction, ephemeralPayload(payload));
+          }
+
+          const created = await withTimeout(
+            prisma.page.create({ data: { workspaceId, title, slug, contentMd: "" } }),
+            8000,
+            "daily/create"
+          );
+          await snapshotVersion(created, interaction.user?.id);
+          await refreshSearchVector(created.id);
+          const payload = await renderPageOpen(workspaceId, created);
+          return safeEdit(interaction, ephemeralPayload(payload));
+        }
+
+        if (interaction.commandName === "search") {
+          const q = interaction.options.getString("q", true).trim();
+          if (!q) return safeEdit(interaction, ephemeralPayload({ content: "Empty query.", components: [] }));
+          const rows = await withTimeout(
+            prisma.$queryRaw(
+              Prisma.sql`SELECT id, title, slug, updatedAt FROM "Page" WHERE "workspaceId" = ${workspaceId} AND "searchVector" @@ plainto_tsquery('simple', ${q}) ORDER BY "updatedAt" DESC LIMIT 20`
+            ),
+            8000,
+            "search/queryRaw"
+          ).catch(() => []);
+          if (!rows.length) return safeEdit(interaction, ephemeralPayload({ content: "No results.", components: [] }));
+
+          const allowed = [];
+          for (const r of rows) {
+            const ok = await canAccess(interaction, workspaceId, r.id, "read");
+            if (ok) allowed.push(r);
+          }
+          const lines = allowed.slice(0, 20).map((r) => `• ${r.title} (/${r.slug})`);
+          return safeEdit(interaction, ephemeralPayload({ content: lines.length ? lines.join("\n") : "No results you can access.", components: [] }));
+        }
+
+        if (interaction.commandName === "page-history") {
+          const q = interaction.options.getString("query", true);
+          const limit = Math.max(1, Math.min(50, interaction.options.getInteger("limit", false) || 10));
+          const page = await getPageByQuery(workspaceId, q);
+          if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
+          if (!(await canAccess(interaction, workspaceId, page.id, "read"))) return safeEdit(interaction, ephemeralPayload({ content: "You don't have read access.", components: [] }));
+
+          const versions = await withTimeout(
+            prisma.pageVersion.findMany({
+              where: { pageId: page.id },
+              orderBy: { version: "desc" },
+              take: limit,
+              select: { version: true, createdAt: true, authorId: true, title: true, slug: true },
+            }),
+            8000,
+            "page-history/list"
+          ).catch(() => []);
+          const lines = versions.map((v) => `v${v.version} | ${new Date(v.createdAt).toISOString().slice(0, 19).replace("T", " ")} | ${v.title} (${v.slug})`);
+          return safeEdit(interaction, ephemeralPayload({ content: lines.length ? lines.join("\n") : "No history yet.", components: [] }));
+        }
+
+        if (interaction.commandName === "page-rollback") {
+          const q = interaction.options.getString("query", true);
+          const targetV = interaction.options.getInteger("version", false);
+          const page = await getPageByQuery(workspaceId, q);
+          if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
+          if (!(await canAccess(interaction, workspaceId, page.id, "write"))) return safeEdit(interaction, ephemeralPayload({ content: "You don't have write access.", components: [] }));
+
+          const ver = await withTimeout(
+            prisma.pageVersion.findFirst({
+              where: { pageId: page.id, ...(targetV ? { version: targetV } : {}) },
+              orderBy: { version: "desc" },
+            }),
+            8000,
+            "page-rollback/get"
+          ).catch(() => null);
+
+          if (!ver) return safeEdit(interaction, ephemeralPayload({ content: "No version found.", components: [] }));
+
+          await bumpPageVersion(page, interaction.user?.id);
+          const updated = await withTimeout(
+            prisma.page.update({
+              where: { id: page.id },
+              data: { title: ver.title, slug: ver.slug, contentMd: ver.contentMd || "" },
+            }),
+            8000,
+            "page-rollback/update"
+          );
+          await refreshSearchVector(updated.id);
+          const payload = await renderPageOpen(workspaceId, updated);
+          return safeEdit(interaction, ephemeralPayload(payload));
+        }
+
+        if (interaction.commandName === "perm-set") {
+          const roleId = interaction.options.getString("role_id", true).trim();
+          const canRead = Boolean(interaction.options.getBoolean("read", true));
+          const canWrite = Boolean(interaction.options.getBoolean("write", true));
+          const q = interaction.options.getString("query", false);
+          const channelId = (interaction.options.getString("channel_id", false) || "").trim() || null;
+
+          if (!isAdmin(interaction)) return safeEdit(interaction, ephemeralPayload({ content: "Admin only.", components: [] }));
+
+          let pageId = null;
+          if (q) {
+            const page = await getPageByQuery(workspaceId, q);
+            if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found for scope.", components: [] }));
+            pageId = page.id;
+          }
+
+          await withTimeout(
+            prisma.permissionRule.create({
+              data: { workspaceId, pageId, roleId, channelId, canRead, canWrite },
+            }),
+            8000,
+            "perm-set/create"
+          );
+          return safeEdit(interaction, ephemeralPayload({ content: "OK. Rule added.", components: [] }));
+        }
+
+        if (interaction.commandName === "perm-list") {
+          const q = interaction.options.getString("query", false);
+          let pageId = null;
+          if (q) {
+            const page = await getPageByQuery(workspaceId, q);
+            if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found for scope.", components: [] }));
+            pageId = page.id;
+          }
+          const rules = await withTimeout(
+            prisma.permissionRule.findMany({
+              where: { workspaceId, ...(pageId ? { pageId } : {}) },
+              orderBy: { createdAt: "asc" },
+            }),
+            8000,
+            "perm-list/list"
+          ).catch(() => []);
+          const lines = rules.slice(0, 50).map((r) => {
+            const scope = `${r.pageId ? "page" : "workspace"}${r.channelId ? `@${r.channelId}` : ""}`;
+            const rw = `${r.canRead ? "R" : "-"}${r.canWrite ? "W" : "-"}`;
+            return `${rw} role=${r.roleId} scope=${scope}`;
+          });
+          return safeEdit(interaction, ephemeralPayload({ content: lines.length ? lines.join("\n") : "No rules.", components: [] }));
+        }
+
+        if (interaction.commandName === "perm-clear") {
+          const q = interaction.options.getString("query", false);
+          if (!isAdmin(interaction)) return safeEdit(interaction, ephemeralPayload({ content: "Admin only.", components: [] }));
+          let pageId = null;
+          if (q) {
+            const page = await getPageByQuery(workspaceId, q);
+            if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found for scope.", components: [] }));
+            pageId = page.id;
+          }
+          const deleted = await withTimeout(
+            prisma.permissionRule.deleteMany({ where: { workspaceId, ...(pageId ? { pageId } : {}) } }),
+            8000,
+            "perm-clear/deleteMany"
+          );
+          return safeEdit(interaction, ephemeralPayload({ content: `OK. Removed ${deleted.count || 0} rules.`, components: [] }));
+        }
+
+        return safeEdit(interaction, ephemeralPayload({ content: "Unhandled command.", components: [] }));
       }
 
 return interaction.reply(ephemeralPayload({ content: "Unknown command." })).catch(() => {});

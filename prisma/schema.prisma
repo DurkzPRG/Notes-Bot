@@ -12,6 +12,7 @@ model Workspace {
   createdAt DateTime @default(now())
   pages     Page[]
   perms     PermissionRule[]
+  templates Template[]
 }
 
 model Page {
@@ -20,6 +21,7 @@ model Page {
   title        String
   slug         String
   contentMd    String   @default("")
+  tags         String[]  @default([])
   version      Int      @default(1)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
@@ -66,4 +68,18 @@ model PermissionRule {
   @@index([workspaceId, pageId])
   @@index([workspaceId, roleId])
   @@index([workspaceId, channelId])
+}
+
+model Template {
+  id          String   @id @default(cuid())
+  workspaceId String
+  name        String
+  contentMd   String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId, updatedAt])
 }
