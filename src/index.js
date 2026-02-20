@@ -14,7 +14,7 @@ import {
 } from "discord.js";
 import { PrismaClient, Prisma } from "@prisma/client";
 
-console.log("BOOT: src/index.js LOADED | v=single-listener+global-dedupe-1");
+console.log("BOOT: src/index.js LOADED | v=all-fixes-1");
 
 
 
@@ -87,6 +87,7 @@ function ephemeralPayload(payload = {}) {
   return { ...payload, flags: MessageFlags.Ephemeral };
 }
 
+
 async function safeReply(interaction, payload) {
   try {
     if (interaction.deferred || interaction.replied) return await interaction.followUp(payload);
@@ -102,9 +103,22 @@ async function safeEdit(interaction, payload) {
     if (interaction.deferred || interaction.replied) return await interaction.editReply(payload);
     return await interaction.reply(payload);
   } catch (err) {
+    const code = err?.code;
+    if (code === 40060) {
+      try {
+        return await interaction.editReply(payload);
+      } catch (err2) {
+        console.error("safeEdit failed:", err2);
+        return null;
+      }
+    }
+    if (code === 10062) {
+      console.error("safeEdit failed:", err);
+      return null;
+    }
     try {
       if (interaction.deferred || interaction.replied) return await interaction.editReply(payload);
-      return await interaction.followUp(payload);
+      return await interaction.reply(payload);
     } catch (err2) {
       console.error("safeEdit failed:", err2);
       return null;
@@ -112,36 +126,32 @@ async function safeEdit(interaction, payload) {
   }
 }
 
-async function ensureWorkspace(workspaceId) {
+async function safeDeferReply(interaction, flags) {
   try {
-    await withTimeout(
-      prisma.workspace.upsert({ where: { id: workspaceId }, update: {}, create: { id: workspaceId } }),
-      8000,
-      "ensureWorkspace"
-    );
+    if (interaction.deferred || interaction.replied) return true;
+    await interaction.deferReply({ flags });
+    return true;
   } catch (err) {
-    console.error("ensureWorkspace failed:", err);
+    const code = err?.code;
+    if (code === 40060) return true;
+    console.error("safeDeferReply failed:", err);
+    return false;
   }
 }
 
-async function findPageByQuery(workspaceId, query) {
-  const q = (query || "").trim();
-  const slug = looksLikeSlug(q) ? q.toLowerCase() : slugify(q);
-
-  const bySlug = await withTimeout(
-    prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId, slug } } }),
-    8000,
-    "findPageByQuery/bySlug"
-  );
-  if (bySlug) return bySlug;
-
-  const byTitle = await withTimeout(
-    prisma.page.findFirst({ where: { workspaceId, title: { equals: q, mode: "insensitive" } } }),
-    8000,
-    "findPageByQuery/byTitle"
-  );
-  return byTitle;
+async function safeDeferUpdate(interaction) {
+  try {
+    if (!(await safeDeferUpdate(interaction))) return;
+    return true;
+  } catch (err) {
+    const code = err?.code;
+    if (code === 40060) return true;
+    console.error("safeDeferUpdate failed:", err);
+    return false;
+  }
 }
+
+
 
 function makeListKey(workspaceId, search, pageNum) {
   const s = (search || "").trim();
@@ -183,6 +193,11 @@ function parseKey3(prefix, customId) {
   if (parts.length !== 3) return null;
   return { workspaceId: parts[1], slug: parts[2] };
 }
+
+function editModalKey(workspaceId, slug) {
+  return `pem|${workspaceId}|${slug}`;
+}
+
 function modalEditId(workspaceId, slug) {
   return `pm|${workspaceId}|${slug}`;
 }
@@ -343,6 +358,10 @@ processedInteractions.set(interaction.id, Date.now());
   } catch (e) {
     console.error("INTERACTION LOG FAILED:", e);
   }
+const _seenTs = processedInteractions.get(interaction.id);
+if (_seenTs) return;
+processedInteractions.set(interaction.id, Date.now());
+
 
 
   (async () => {
@@ -414,11 +433,64 @@ if (interaction.isAutocomplete()) {
         if (!guildId) return;
 
         // Pagination buttons
-        if (interaction.customId.startsWith("pl|")) {
+        
+// Edit page (open modal)
+if (interaction.customId.startsWith("pe|")) {
+  const parsed = parseKey3("pe", interaction.customId);
+  if (!parsed) return;
+
+  if (parsed.workspaceId !== guildId) {
+    if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
+    return safeEdit(interaction, ephemeralPayload({ content: "Invalid action.", components: [] }));
+  }
+
+  const pagePromise = withTimeout(
+    prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId: guildId, slug: parsed.slug } } }),
+    1800,
+    "page-edit/get"
+  ).catch(() => null);
+
+  const page = await Promise.race([pagePromise, new Promise((resolve) => setTimeout(() => resolve(null), 1200))]);
+
+  const contentValue = page?.contentMd ? String(page.contentMd).slice(0, 4000) : "";
+  const titleValue = page?.title ? String(page.title).slice(0, 100) : parsed.slug;
+
+  const modal = new ModalBuilder()
+    .setCustomId(editModalKey(guildId, parsed.slug))
+    .setTitle("Edit page")
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId("title")
+          .setLabel("Title")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(100)
+          .setValue(titleValue)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId("content")
+          .setLabel("Content (Markdown)")
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(false)
+          .setMaxLength(4000)
+          .setValue(contentValue)
+      )
+    );
+
+  await interaction.showModal(modal).catch(async () => {
+    if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
+    return safeEdit(interaction, ephemeralPayload({ content: "Could not open editor (try again).", components: [] }));
+  });
+  return;
+}
+
+if (interaction.customId.startsWith("pl|")) {
           const parsed = parseListKey(interaction.customId);
           if (!parsed) return;
 
-          await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+          if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
           if (parsed.workspaceId !== guildId) return safeEdit(interaction, ephemeralPayload({ content: "Invalid action.", components: [] }));
           return runPageList(interaction, guildId, parsed.search, parsed.pageNum);
         }
@@ -428,7 +500,7 @@ if (interaction.isAutocomplete()) {
           const parsed = parseOpenKey(interaction.customId);
           if (!parsed) return;
 
-          await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+          if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
           if (parsed.workspaceId !== guildId) return safeEdit(interaction, ephemeralPayload({ content: "Invalid action.", components: [] }));
 
           const page = await withTimeout(
@@ -448,7 +520,7 @@ if (interaction.customId.startsWith("pd|")) {
   const parsed = parseKey3("pd", interaction.customId);
   if (!parsed) return;
 
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+  if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
   if (parsed.workspaceId !== guildId) return safeEdit(interaction, ephemeralPayload({ content: "Invalid action.", components: [] }));
 
   const page = await withTimeout(
@@ -478,7 +550,7 @@ if (interaction.customId.startsWith("pdc|")) {
   const parsed = parseKey3("pdc", interaction.customId);
   if (!parsed) return;
 
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+  if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
   if (parsed.workspaceId !== guildId) return safeEdit(interaction, ephemeralPayload({ content: "Invalid action.", components: [] }));
 
   await withTimeout(
@@ -496,7 +568,75 @@ if (interaction.customId.startsWith("pdc|")) {
 return;
       }
 
-      if (!interaction.isChatInputCommand()) return;
+      
+if (interaction.isModalSubmit && interaction.isModalSubmit()) {
+  const guildId = interaction.guildId;
+  if (!guildId) return;
+
+  if (interaction.customId.startsWith("pem|")) {
+    const parsed = parseKey3("pem", interaction.customId);
+    if (!parsed) return;
+
+    if (parsed.workspaceId !== guildId) {
+      if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
+      return safeEdit(interaction, ephemeralPayload({ content: "Invalid action.", components: [] }));
+    }
+
+    const newTitle = String(interaction.fields.getTextInputValue("title") || "").trim().slice(0, 100);
+    const newContent = String(interaction.fields.getTextInputValue("content") || "");
+
+    if (!newTitle) {
+      if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
+      return safeEdit(interaction, ephemeralPayload({ content: "Title cannot be empty.", components: [] }));
+    }
+
+    if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
+
+    const baseSlug = slugify(newTitle) || parsed.slug;
+    let slug = baseSlug;
+
+    let updated = null;
+    for (let i = 0; i < 25; i++) {
+      try {
+        updated = await withTimeout(
+          prisma.page.update({
+            where: { workspaceId_slug: { workspaceId: guildId, slug: parsed.slug } },
+            data: { title: newTitle, slug, contentMd: newContent },
+          }),
+          8000,
+          "page-edit/update"
+        );
+        break;
+      } catch (err) {
+        if (err?.code === "P2002") {
+          slug = `${baseSlug}-${i + 2}`;
+          continue;
+        }
+        if (err?.code === "P2025") break;
+        throw err;
+      }
+    }
+
+    if (!updated) return safeEdit(interaction, ephemeralPayload({ content: "Page not found (maybe deleted).", components: [] }));
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(openKey(guildId, updated.slug)).setLabel("Open").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(makeListKey(guildId, "", 1)).setLabel("Back to list").setStyle(ButtonStyle.Secondary)
+    );
+
+    return safeEdit(
+      interaction,
+      ephemeralPayload({
+        content: `✅ Saved: **${updated.title}** (slug: \`${updated.slug}\`)`,
+        components: [row],
+      })
+    );
+  }
+
+  return;
+}
+
+if (!interaction.isChatInputCommand()) return;
 
       const guildId = interaction.guildId;
       if (!guildId) {
@@ -506,13 +646,13 @@ return;
       await ensureWorkspace(guildId);
 
       if (interaction.commandName === "page-list") {
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
         const search = interaction.options.getString("search") ?? "";
         return runPageList(interaction, guildId, search, 1);
       }
 
       if (interaction.commandName === "page-open") {
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
         const query = interaction.options.getString("query", true);
         const page = await findPageByQuery(guildId, query);
         if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
@@ -522,7 +662,7 @@ return;
       }
 
       if (interaction.commandName === "page-create") {
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
         const title = interaction.options.getString("title", true);
         const content = interaction.options.getString("content") ?? "";
         
