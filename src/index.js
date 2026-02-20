@@ -857,21 +857,21 @@ await refreshSearchVector(page.id);
                 "**History**",
                 "• `/page-history query` — List versions",
                 "• `/page-rollback query version` — Roll back to a version",
-              ].join("
-").slice(0, 1024),
+              ].join("\n").slice(0, 1024),
               inline: false,
             },
             {
               name: "Planned (not implemented yet)",
               value: [
                 "• `none`",
-              ].join("
-"),
+              ].join("\n"),
               inline: false,
             }
           );
         return safeReply(interaction, ephemeralPayload({ embeds: [embed] }));
-      }if (interaction.commandName === "page-rename") {
+      }
+
+      if (interaction.commandName === "page-rename") {
         if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
         const query = interaction.options.getString("query", true);
         const newTitle = String(interaction.options.getString("title", true)).trim().slice(0, 100);
