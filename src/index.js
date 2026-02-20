@@ -201,13 +201,15 @@ function ephemeralPayload(payload = {}) {
 
 async function safeReply(interaction, payload) {
   try {
-    if (interaction.deferred || interaction.replied) return await interaction.followUp(payload);
+    if (interaction.deferred) return await interaction.editReply(payload);
+    if (interaction.replied) return await interaction.followUp(payload);
     return await interaction.reply(payload);
   } catch (err) {
     console.error("safeReply failed:", err);
     return null;
   }
 }
+
 
 async function safeEdit(interaction, payload) {
   try {
@@ -269,7 +271,7 @@ async function safeDeferUpdate(interaction) {
 function makeListKey(guildId, search, pageNum) {
   const s = (search || "").trim();
   const p = clampInt(pageNum || 1, 1, 1000);
-  return `pl|${workspaceId}|${encodeURIComponent(s)}|${p}`;
+  return `pl|${guildId}|${encodeURIComponent(s)}|${p}`;
 }
 
 function parseListKey(customId) {
@@ -283,7 +285,7 @@ function parseListKey(customId) {
 }
 
 function openKey(guildId, slug) {
-  return `po|${workspaceId}|${slug}`;
+  return `po|${guildId}|${slug}`;
 }
 function parseOpenKey(customId) {
   if (!customId || !customId.startsWith("po|")) return null;
@@ -292,10 +294,10 @@ function parseOpenKey(customId) {
   return { workspaceId: parts[1], slug: parts[2] };
 }
 function editKey(guildId, slug) {
-  return `pe|${workspaceId}|${slug}`;
+  return `pe|${guildId}|${slug}`;
 }
 function delKey(guildId, slug) {
-  return `pd|${workspaceId}|${slug}`;
+  return `pd|${guildId}|${slug}`;
 }
 function delConfirmKey(workspaceId, slug) {
   return `pdc|${workspaceId}|${slug}`;
@@ -861,6 +863,7 @@ await refreshSearchVector(page.id);
       }
 
       if (interaction.commandName === "help") {
+        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
         const embed = new EmbedBuilder()
           .setTitle("Notes Bot Help")
           .setDescription("A lightweight Notion/Obsidian-style notes bot for Discord.")
@@ -911,7 +914,7 @@ await refreshSearchVector(page.id);
               inline: false,
             }
           );
-        return safeReply(interaction, ephemeralPayload({ embeds: [embed] }));
+        return safeEdit(interaction, ephemeralPayload({ embeds: [embed] }));
       }
 
       if (interaction.commandName === "page-rename") {
