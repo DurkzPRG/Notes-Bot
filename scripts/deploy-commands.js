@@ -3,7 +3,7 @@ import { REST, Routes } from "discord.js";
 
 let pageCommands;
 try {
-  ({ pageCommands } = await import("./src/commands/page.js"));
+  ({ pageCommands } = await import("../src/commands/page.js"));
 } catch {
   ({ pageCommands } = await import("./page.js"));
 }
