@@ -865,9 +865,7 @@ await refreshSearchVector(page.id);
           }
           return safeEdit(interaction, ephemeralPayload({ content: "Could not rename (slug collision).", components: [] }));
         }
-
-        const updated = await withTimeout(
-await bumpPageVersion(page, interaction.user?.id);
+await bumpPageVersion(page, interaction.user?.id);        const updated = await withTimeout(
           prisma.page.update({
             where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
             data: { title: newTitle },
@@ -889,8 +887,7 @@ await bumpPageVersion(page, interaction.user?.id);
         const page = await findPageByQuery(guildId, query);
         if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
         const newTitle = `${folder}/${page.title}`;
-        const updated = await withTimeout(
-await bumpPageVersion(page, interaction.user?.id);
+await bumpPageVersion(page, interaction.user?.id);        const updated = await withTimeout(
           prisma.page.update({
             where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
             data: { title: newTitle.slice(0, 100) },
@@ -949,8 +946,7 @@ ${md}`;
         const content = String(interaction.options.getString("content", true));
         const page = await findPageByQuery(guildId, query);
         if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
-        const updated = await withTimeout(
-await bumpPageVersion(page, interaction.user?.id);
+await bumpPageVersion(page, interaction.user?.id);        const updated = await withTimeout(
           prisma.page.update({
             where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
             data: { contentMd: content },
