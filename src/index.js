@@ -14,7 +14,7 @@ import {
 } from "discord.js";
 import { PrismaClient, Prisma } from "@prisma/client";
 
-console.log("BOOT: src/index.js LOADED | v=all-fixes-2");
+console.log("BOOT: src/index.js LOADED | v=all-fixes-3");
 
 
 
@@ -37,6 +37,11 @@ app.listen(PORT, "0.0.0.0", () => console.log("Health server up on port", PORT))
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const prisma = new PrismaClient({ log: ["error", "warn"] });
+
+
+async function ensureWorkspace(_workspaceId) {
+  return;
+}
 
 function withTimeout(promise, ms, label) {
   let t;
@@ -639,9 +644,6 @@ if (!interaction.isChatInputCommand()) return;
       if (!guildId) {
         return interaction.reply(ephemeralPayload({ content: "This command only works inside a server." })).catch(() => {});
       }
-
-      await ensureWorkspace(guildId);
-
       if (interaction.commandName === "page-list") {
         if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
         const search = interaction.options.getString("search") ?? "";
