@@ -14,7 +14,7 @@ import {
 } from "discord.js";
 import { PrismaClient, Prisma } from "@prisma/client";
 
-console.log("BOOT: src/index.js LOADED | v=all-fixes-3");
+console.log("BOOT: src/index.js LOADED | v=stabilized-1");
 
 
 
@@ -87,8 +87,6 @@ function clampInt(n, min, max) {
 }
 
 function ephemeralPayload(payload = {}) {
-  // Avoid deprecated "ephemeral: true" by using flags.
-  // Works in discord.js v14+.
   return { ...payload, flags: MessageFlags.Ephemeral };
 }
 
@@ -144,9 +142,11 @@ async function safeDeferReply(interaction, flags) {
   }
 }
 
+
 async function safeDeferUpdate(interaction) {
   try {
-    if (!(await safeDeferUpdate(interaction))) return;
+    if (interaction.deferred || interaction.replied) return true;
+    await interaction.deferUpdate();
     return true;
   } catch (err) {
     const code = err?.code;
@@ -302,7 +302,6 @@ async function runPageList(interaction, workspaceId, search, pageNum) {
 
   const lines = rows.map((r, i) => `${skip + i + 1}. ${r.title}  |  ${r.slug}`);
 
-  // FIX: Avoid duplicated custom_id when totalPages === 1
   const prevPage = Math.max(1, current - 1);
   const nextPage = Math.min(totalPages, current + 1);
   const prevId = makeListKey(workspaceId, s, prevPage);
@@ -329,6 +328,41 @@ async function runPageList(interaction, workspaceId, search, pageNum) {
   return safeEdit(interaction, ephemeralPayload({ content: trimForDiscord(`${header}\n\n${lines.join("\n")}`, 1900), components }));
 }
 
+
+async function findPageByQuery(workspaceId, query) {
+  const q = String(query || "").trim();
+  if (!q) return null;
+
+  if (looksLikeSlug(q)) {
+    const bySlug = await withTimeout(
+      prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId, slug: q } } }),
+      8000,
+      "findPageByQuery/slug"
+    ).catch(() => null);
+    if (bySlug) return bySlug;
+  }
+
+  const slugQ = slugify(q);
+  const rows = await withTimeout(
+    prisma.page.findMany({
+      where: {
+        workspaceId,
+        OR: [
+          { title: { equals: q, mode: "insensitive" } },
+          ...(slugQ ? [{ slug: { equals: slugQ, mode: "insensitive" } }] : []),
+          { title: { contains: q, mode: "insensitive" } },
+          ...(slugQ ? [{ slug: { contains: slugQ, mode: "insensitive" } }] : []),
+        ],
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 1,
+    }),
+    8000,
+    "findPageByQuery/fuzzy"
+  ).catch(() => []);
+  return rows?.[0] ?? null;
+}
+
 client.once("ready", () => {
   console.log(`Bot online como ${client.user?.tag}`);
 });
@@ -349,7 +383,6 @@ const _seenTs = processedInteractions.get(interaction.id);
 if (_seenTs) return;
 processedInteractions.set(interaction.id, Date.now());
 
-  // Log immediately (no await before) so we always see it in Render logs
   try {
     console.error("INTERACTION RECEIVED:", {
       id: interaction.id,
@@ -434,9 +467,7 @@ if (interaction.isAutocomplete()) {
         const guildId = interaction.guildId;
         if (!guildId) return;
 
-        // Pagination buttons
         
-// Edit page (open modal)
 if (interaction.customId.startsWith("pe|")) {
   const parsed = parseKey3("pe", interaction.customId);
   if (!parsed) return;
@@ -497,7 +528,6 @@ if (interaction.customId.startsWith("pl|")) {
           return runPageList(interaction, guildId, parsed.search, parsed.pageNum);
         }
 
-        // Refresh page
         if (interaction.customId.startsWith("po|")) {
           const parsed = parseOpenKey(interaction.customId);
           if (!parsed) return;
@@ -517,7 +547,6 @@ if (interaction.customId.startsWith("pl|")) {
         }
 
         
-// Delete page (ask for confirmation)
 if (interaction.customId.startsWith("pd|")) {
   const parsed = parseKey3("pd", interaction.customId);
   if (!parsed) return;
@@ -547,7 +576,6 @@ if (interaction.customId.startsWith("pd|")) {
   );
 }
 
-// Delete page (confirmed)
 if (interaction.customId.startsWith("pdc|")) {
   const parsed = parseKey3("pdc", interaction.customId);
   if (!parsed) return;
@@ -708,7 +736,160 @@ await refreshSearchVector(page.id);
         return interaction.reply(ephemeralPayload({ content: trimForDiscord(msg, 1900) })).catch(() => {});
       }
 
-      return interaction.reply(ephemeralPayload({ content: "Unknown command." })).catch(() => {});
+      
+      if (interaction.commandName === "page-rename") {
+        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
+        const query = interaction.options.getString("query", true);
+        const newTitle = String(interaction.options.getString("title", true)).trim().slice(0, 100);
+        const keepSlug = Boolean(interaction.options.getBoolean("keep_slug") ?? false);
+
+        const page = await findPageByQuery(guildId, query);
+        if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
+        if (!newTitle) return safeEdit(interaction, ephemeralPayload({ content: "Title cannot be empty.", components: [] }));
+
+        let slug = page.slug;
+        if (!keepSlug) {
+          const baseSlug = slugify(newTitle) || "page";
+          slug = baseSlug;
+          for (let i = 0; i < 25; i++) {
+            try {
+              const updated = await withTimeout(
+                prisma.page.update({
+                  where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
+                  data: { title: newTitle, slug },
+                }),
+                8000,
+                "page-rename/update"
+              );
+              await refreshSearchVector(updated.id);
+              const payload = await renderPageOpen(guildId, updated);
+              return safeEdit(interaction, ephemeralPayload(payload));
+            } catch (err) {
+              if (err?.code === "P2002") {
+                slug = `${baseSlug}-${i + 2}`;
+                continue;
+              }
+              throw err;
+            }
+          }
+          return safeEdit(interaction, ephemeralPayload({ content: "Could not rename (slug collision).", components: [] }));
+        }
+
+        const updated = await withTimeout(
+          prisma.page.update({
+            where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
+            data: { title: newTitle },
+          }),
+          8000,
+          "page-rename/update-keep"
+        );
+        await refreshSearchVector(updated.id);
+        const payload = await renderPageOpen(guildId, updated);
+        return safeEdit(interaction, ephemeralPayload(payload));
+      }
+
+      if (interaction.commandName === "page-move") {
+        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
+        const query = interaction.options.getString("query", true);
+        const folder = String(interaction.options.getString("folder", true)).trim().replace(/^\/+|\/+$/g, "");
+        if (!folder) return safeEdit(interaction, ephemeralPayload({ content: "Folder cannot be empty.", components: [] }));
+
+        const page = await findPageByQuery(guildId, query);
+        if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
+        const newTitle = `${folder}/${page.title}`;
+        const updated = await withTimeout(
+          prisma.page.update({
+            where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
+            data: { title: newTitle.slice(0, 100) },
+          }),
+          8000,
+          "page-move/update"
+        );
+        await refreshSearchVector(updated.id);
+        const payload = await renderPageOpen(guildId, updated);
+        return safeEdit(interaction, ephemeralPayload(payload));
+      }
+
+      if (interaction.commandName === "backlinks") {
+        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
+        const query = interaction.options.getString("query", true);
+        const target = await findPageByQuery(guildId, query);
+        if (!target) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
+
+        const needles = [`[[${target.slug}]]`, `[[${target.title}]]`].filter(Boolean);
+        const rows = await withTimeout(
+          prisma.page.findMany({
+            where: {
+              workspaceId: guildId,
+              OR: needles.map((n) => ({ contentMd: { contains: n } })),
+            },
+            orderBy: { updatedAt: "desc" },
+            take: 25,
+            select: { title: true, slug: true },
+          }),
+          8000,
+          "backlinks/query"
+        ).catch(() => []);
+
+        if (!rows.length) return safeEdit(interaction, ephemeralPayload({ content: "No backlinks found.", components: [] }));
+
+        const lines = rows.map((r, i) => `${i + 1}. ${r.title} | ${r.slug}`);
+        return safeEdit(interaction, ephemeralPayload({ content: trimForDiscord(`Backlinks to ${target.title} (${target.slug})
+
+${lines.join("
+")}`, 1900), components: [] }));
+      }
+
+      if (interaction.commandName === "export") {
+        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
+        const query = interaction.options.getString("query", true);
+        const page = await findPageByQuery(guildId, query);
+        if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
+        const md = (page.contentMd || "").trim();
+        const content = `# ${page.title}
+
+${md}`;
+        return safeEdit(interaction, ephemeralPayload({ content: trimForDiscord(content, 1900), components: [] }));
+      }
+
+      if (interaction.commandName === "import") {
+        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
+        const query = interaction.options.getString("query", true);
+        const content = String(interaction.options.getString("content", true));
+        const page = await findPageByQuery(guildId, query);
+        if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
+        const updated = await withTimeout(
+          prisma.page.update({
+            where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
+            data: { contentMd: content },
+          }),
+          8000,
+          "import/update"
+        );
+        await refreshSearchVector(updated.id);
+        const payload = await renderPageOpen(guildId, updated);
+        return safeEdit(interaction, ephemeralPayload(payload));
+      }
+
+      if (
+        interaction.commandName === "tag-add" ||
+        interaction.commandName === "tag-remove" ||
+        interaction.commandName === "tag-list" ||
+        interaction.commandName === "search" ||
+        interaction.commandName === "daily" ||
+        interaction.commandName === "template-create" ||
+        interaction.commandName === "template-use" ||
+        interaction.commandName === "page-history" ||
+        interaction.commandName === "page-rollback" ||
+        interaction.commandName === "perm-set" ||
+        interaction.commandName === "perm-list" ||
+        interaction.commandName === "perm-clear"
+      ) {
+        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
+        return safeEdit(interaction, ephemeralPayload({ content: "This command is not implemented in this build.", components: [] }));
+      }
+
+return interaction.reply(ephemeralPayload({ content: "Unknown command." })).catch(() => {});
     } catch (err) {
       console.error("interaction handler crashed:", err);
       try {
