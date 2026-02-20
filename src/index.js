@@ -260,21 +260,35 @@ async function runPageList(interaction, workspaceId, search, pageNum) {
   const header = `Pages ${skip + 1}-${Math.min(skip + rows.length, total)} of ${total} (page ${current}/${totalPages})` + (s ? ` | search: ${s}` : "");
   const lines = rows.map((r, i) => `${skip + i + 1}. ${r.title}  |  ${r.slug}`);
 
-  const row = new ActionRowBuilder().addComponents(
+  const prevPage = Math.max(1, current - 1);
+  const nextPage = Math.min(totalPages, current + 1);
+
+  const prevId = makeListKey(workspaceId, s, prevPage);
+  const nextId = makeListKey(workspaceId, s, nextPage);
+
+  let components = [];
+
+  if (totalPages > 1) {
+	const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(makeListKey(workspaceId, s, Math.max(1, current - 1)))
+      .setCustomId(prevId)
       .setLabel("Previous")
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(current <= 1),
     new ButtonBuilder()
-      .setCustomId(makeListKey(workspaceId, s, Math.min(totalPages, current + 1)))
+      .setCustomId(nextId)
       .setLabel("Next")
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(current >= totalPages)
   );
 
-  return safeEdit(interaction, { content: trimForDiscord(`${header}\n\n${lines.join("\n")}`, 1900), components: [row] });
+  components = [row];
 }
+
+  return safeEdit(interaction, {
+  content: trimForDiscord(`${header}\n\n${lines.join("\n")}`, 1900),
+  components,
+});
 
 client.once("ready", () => {
   console.log(`Bot online como ${client.user?.tag}`);
@@ -284,7 +298,6 @@ client.once("clientReady", () => {
 });
 
 client.on("interactionCreate", (interaction) => {
-  // NEVER await before this log (we want to prove receipt)
   try {
     console.error("INTERACTION RECEIVED:", {
       id: interaction.id,
@@ -369,7 +382,6 @@ client.on("interactionCreate", (interaction) => {
       await ensureWorkspace(guildId);
 
       if (interaction.commandName === "page-list") {
-        // IMPORTANT: reply immediately so Discord never stays "thinking"
         await interaction.reply({ content: "Loading pages…", ephemeral: true }).catch(() => {});
         const search = interaction.options.getString("search") ?? "";
         return runPageList(interaction, guildId, search, 1);
