@@ -14,10 +14,13 @@ import {
 } from "discord.js";
 import { PrismaClient, Prisma } from "@prisma/client";
 
-console.log("BOOT: src/index.js LOADED | v=delete-buttons-fix-1");
+console.log("BOOT: src/index.js LOADED | v=single-listener+global-dedupe-1");
 
 
-const processedInteractions = new Map();
+
+const processedInteractions = globalThis.__processedInteractions ?? new Map();
+globalThis.__processedInteractions = processedInteractions;
+
 setInterval(() => {
   const now = Date.now();
   for (const [id, ts] of processedInteractions.entries()) {
@@ -313,7 +316,19 @@ client.once("clientReady", () => {
   console.log(`Bot online (clientReady) como ${client.user?.tag}`);
 });
 
+
+if (globalThis.__interactionCreateInstalled) {
+  try { client.removeAllListeners("interactionCreate"); } catch {}
+}
+globalThis.__interactionCreateInstalled = true;
+
+client.removeAllListeners("interactionCreate");
 client.on("interactionCreate", (interaction) => {
+
+const _seenTs = processedInteractions.get(interaction.id);
+if (_seenTs) return;
+processedInteractions.set(interaction.id, Date.now());
+
   // Log immediately (no await before) so we always see it in Render logs
   try {
     console.error("INTERACTION RECEIVED:", {
@@ -328,10 +343,6 @@ client.on("interactionCreate", (interaction) => {
   } catch (e) {
     console.error("INTERACTION LOG FAILED:", e);
   }
-const _seenTs = processedInteractions.get(interaction.id);
-if (_seenTs) return;
-processedInteractions.set(interaction.id, Date.now());
-
 
 
   (async () => {
