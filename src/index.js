@@ -14,7 +14,7 @@ import {
 } from "discord.js";
 import { PrismaClient, Prisma } from "@prisma/client";
 
-console.log("BOOT: src/index.js LOADED | v=stabilized-1");
+console.log("BOOT: src/index.js LOADED | v=stabilized-2");
 
 
 
@@ -836,8 +836,7 @@ await refreshSearchVector(page.id);
         const lines = rows.map((r, i) => `${i + 1}. ${r.title} | ${r.slug}`);
         return safeEdit(interaction, ephemeralPayload({ content: trimForDiscord(`Backlinks to ${target.title} (${target.slug})
 
-${lines.join("
-")}`, 1900), components: [] }));
+${lines.join("\n")}`, 1900), components: [] }));
       }
 
       if (interaction.commandName === "export") {
