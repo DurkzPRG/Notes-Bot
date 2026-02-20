@@ -14,7 +14,7 @@ import {
 } from "discord.js";
 import { PrismaClient, Prisma } from "@prisma/client";
 
-console.log("BOOT: src/index.js LOADED | v=page-list-fix-dup-customid-1");
+console.log("BOOT: src/index.js LOADED | v=autocomplete-fix-1");
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -307,9 +307,73 @@ client.on("interactionCreate", (interaction) => {
 
   (async () => {
     try {
-      if (interaction.isAutocomplete()) return;
+      
+if (interaction.isAutocomplete()) {
+  const guildId = interaction.guildId;
+  if (!guildId) {
+    await interaction.respond([]).catch(() => {});
+    return;
+  }
 
-      if (interaction.isButton()) {
+  const cmd = interaction.commandName;
+  const focused = interaction.options.getFocused(true);
+  const q = String(focused?.value ?? "").trim();
+
+  if (!cmd) {
+    await interaction.respond([]).catch(() => {});
+    return;
+  }
+
+  if (
+    cmd === "page-open" ||
+    cmd === "page-rename" ||
+    cmd === "page-move" ||
+    cmd === "tag-add" ||
+    cmd === "tag-remove" ||
+    cmd === "backlinks" ||
+    cmd === "export" ||
+    cmd === "import" ||
+    cmd === "page-history" ||
+    cmd === "page-rollback" ||
+    cmd === "perm-set" ||
+    cmd === "perm-list" ||
+    cmd === "perm-clear"
+  ) {
+    const where = q
+      ? {
+          workspaceId: guildId,
+          OR: [
+            { title: { contains: q, mode: "insensitive" } },
+            { slug: { contains: slugify(q), mode: "insensitive" } },
+            { contentMd: { contains: q, mode: "insensitive" } },
+          ],
+        }
+      : { workspaceId: guildId };
+
+    const rows = await withTimeout(
+      prisma.page.findMany({
+        where,
+        orderBy: { updatedAt: "desc" },
+        take: 25,
+        select: { title: true, slug: true },
+      }),
+      8000,
+      "autocomplete/pages"
+    ).catch(() => []);
+
+    const choices = (rows || []).slice(0, 25).map((r) => ({
+      name: `${r.title}`.slice(0, 100),
+      value: r.slug,
+    }));
+
+    await interaction.respond(choices).catch(() => {});
+    return;
+  }
+
+  await interaction.respond([]).catch(() => {});
+  return;
+}
+if (interaction.isButton()) {
         const guildId = interaction.guildId;
         if (!guildId) return;
 
