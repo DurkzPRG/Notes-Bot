@@ -10,6 +10,7 @@ import {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  PermissionFlagsBits,
 } from "discord.js";
 import { PrismaClient, Prisma } from "@prisma/client";
 
@@ -100,9 +101,9 @@ function splitHeaderAndBody(contentMd) {
 }
 
 function buildContentWithTags(tags, body) {
-  const cleanTags = Array.from(new Set((tags || []).map((t) => (t || "").toLowerCase().replace(/^#/, "")))).filter((t) =>
-    /^[a-z0-9_-]{1,32}$/.test(t)
-  );
+  const cleanTags = Array.from(
+    new Set((tags || []).map((t) => (t || "").toLowerCase().replace(/^#/, "")))
+  ).filter((t) => /^[a-z0-9_-]{1,32}$/.test(t));
   const header = cleanTags.length ? `tags: ${cleanTags.join(", ")}` : "";
   const b = (body || "").replace(/^\n+/, "");
   if (!header) return b;
@@ -239,7 +240,10 @@ function nowDateIso() {
 
 function isAdmin(interaction) {
   try {
-    return Boolean(interaction.memberPermissions?.has("Administrator") || interaction.memberPermissions?.has("ManageGuild"));
+    return Boolean(
+      interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
+        interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)
+    );
   } catch {
     return false;
   }
@@ -346,6 +350,50 @@ async function renderPageOpen(workspaceId, page) {
   return { content: trimForDiscord(text, 1900), components: [row] };
 }
 
+async function buildPermContext(interaction, workspaceId, pageIds) {
+  const isAdm = isAdmin(interaction);
+  if (isAdm) return { isAdm, hasAny: false, roleIds: [], rules: [] };
+
+  const roleIds = memberRoleIds(interaction);
+  const ids = Array.from(new Set((pageIds || []).filter(Boolean).map(String)));
+
+  const hasAnyCount = await prisma.permissionRule.count({
+    where: {
+      workspaceId,
+      OR: [{ pageId: null }, ...(ids.length ? [{ pageId: { in: ids } }] : [])],
+    },
+  });
+
+  const hasAny = hasAnyCount > 0;
+  if (!hasAny) return { isAdm, hasAny: false, roleIds, rules: [] };
+
+  const rules = await prisma.permissionRule.findMany({
+    where: {
+      workspaceId,
+      OR: [{ pageId: null }, ...(ids.length ? [{ pageId: { in: ids } }] : [])],
+    },
+  });
+
+  return { isAdm, hasAny: true, roleIds, rules };
+}
+
+function canReadWithCtx(ctx, pageId, channelId) {
+  if (ctx.isAdm) return true;
+  if (!ctx.hasAny) return true;
+
+  const pid = String(pageId);
+  const ch = String(channelId);
+
+  for (const r of ctx.rules) {
+    if (!r.canRead) continue;
+    if (!ctx.roleIds.includes(String(r.roleId))) continue;
+    if (r.channelId && String(r.channelId) !== ch) continue;
+    if (r.pageId && String(r.pageId) !== pid) continue;
+    return true;
+  }
+  return false;
+}
+
 async function runPageList(interaction, workspaceId, search, pageNum) {
   const take = 10;
   const p = clampInt(pageNum || 1, 1, 1000);
@@ -384,9 +432,15 @@ async function runPageList(interaction, workspaceId, search, pageNum) {
     });
   }
 
+  const ctx = await buildPermContext(
+    interaction,
+    workspaceId,
+    rows.map((r) => r.id)
+  );
+
   const visible = [];
   for (const r of rows) {
-    if (await canRead(interaction, workspaceId, r.id)) visible.push(r);
+    if (canReadWithCtx(ctx, r.id, interaction.channelId)) visible.push(r);
   }
 
   const totalPages = Math.max(1, Math.ceil(total / take));
@@ -490,9 +544,15 @@ function helpText() {
   );
 }
 
-client.once("clientReady", () => {
-  console.log(`Bot online como ${client.user.tag}`);
-});
+let didReadyLog = false;
+function onReady() {
+  if (didReadyLog) return;
+  didReadyLog = true;
+  console.log(`Bot online como ${client.user?.tag}`);
+}
+
+client.once("ready", onReady);
+client.once("clientReady", onReady);
 
 client.on("interactionCreate", async (interaction) => {
   if (interaction.isAutocomplete()) {
@@ -520,9 +580,15 @@ client.on("interactionCreate", async (interaction) => {
       select: { title: true, slug: true, id: true },
     });
 
+    const ctx = await buildPermContext(
+      interaction,
+      guildId,
+      rows.map((r) => r.id)
+    );
+
     const visible = [];
     for (const r of rows) {
-      if (await canRead(interaction, guildId, r.id)) visible.push(r);
+      if (canReadWithCtx(ctx, r.id, interaction.channelId)) visible.push(r);
     }
 
     const choices = visible.slice(0, 20).map((r) => ({
@@ -1148,13 +1214,14 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     return safeRespond(interaction, { content: "Unknown command.", components: [] });
-  } catch {
+  } catch (err) {
+    console.error(err);
     return safeRespond(interaction, { content: "Command error.", components: [] });
   }
 });
 
-process.on("unhandledRejection", () => {});
-process.on("uncaughtException", () => {});
+process.on("unhandledRejection", (err) => console.error("unhandledRejection:", err));
+process.on("uncaughtException", (err) => console.error("uncaughtException:", err));
 
 process.on("SIGINT", async () => {
   await prisma.$disconnect();
