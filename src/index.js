@@ -844,9 +844,8 @@ await refreshSearchVector(page.id);
           slug = baseSlug;
           for (let i = 0; i < 25; i++) {
             try {
-              const updated = await withTimeout(
-await bumpPageVersion(page, interaction.user?.id);
-                prisma.page.update({
+              await bumpPageVersion(page, interaction.user?.id);const updated = await withTimeout(
+          prisma.page.update({
                   where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
                   data: { title: newTitle, slug },
                 }),
