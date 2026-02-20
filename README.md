@@ -26,6 +26,12 @@ version history.
 
 ------------------------------------------------------------------------
 
+## Invite Bot link and Support Server
+
+#### Here is the link to add the bot to your server: [BotLink](https://discord.com/oauth2/authorize?client_id=1474131071447863316). 
+#### Join the bot’s support server if you have any questions: [BotDiscordServer](https://discord.gg/fqfrxsS5WN).
+------------------------------------------------------------------------
+
 ## Features
 
 ### Pages
