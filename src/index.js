@@ -14,7 +14,7 @@ import {
 } from "discord.js";
 import { PrismaClient, Prisma } from "@prisma/client";
 
-console.log("BOOT: src/index.js LOADED | v=autocomplete-fix-1");
+console.log("BOOT: src/index.js LOADED | v=autocomplete+safeedit-fix-1");
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -75,13 +75,28 @@ function ephemeralPayload(payload = {}) {
   return { ...payload, flags: MessageFlags.Ephemeral };
 }
 
+async function safeReply(interaction, payload) {
+  try {
+    if (interaction.deferred || interaction.replied) return await interaction.followUp(payload);
+    return await interaction.reply(payload);
+  } catch (err) {
+    console.error("safeReply failed:", err);
+    return null;
+  }
+}
+
 async function safeEdit(interaction, payload) {
   try {
     if (interaction.deferred || interaction.replied) return await interaction.editReply(payload);
     return await interaction.reply(payload);
   } catch (err) {
-    console.error("safeEdit failed:", err);
-    return null;
+    try {
+      if (interaction.deferred || interaction.replied) return await interaction.editReply(payload);
+      return await interaction.followUp(payload);
+    } catch (err2) {
+      console.error("safeEdit failed:", err2);
+      return null;
+    }
   }
 }
 
@@ -307,7 +322,7 @@ client.on("interactionCreate", (interaction) => {
 
   (async () => {
     try {
-      
+
 if (interaction.isAutocomplete()) {
   const guildId = interaction.guildId;
   if (!guildId) {
@@ -318,11 +333,6 @@ if (interaction.isAutocomplete()) {
   const cmd = interaction.commandName;
   const focused = interaction.options.getFocused(true);
   const q = String(focused?.value ?? "").trim();
-
-  if (!cmd) {
-    await interaction.respond([]).catch(() => {});
-    return;
-  }
 
   if (
     cmd === "page-open" ||
@@ -373,7 +383,8 @@ if (interaction.isAutocomplete()) {
   await interaction.respond([]).catch(() => {});
   return;
 }
-if (interaction.isButton()) {
+
+      if (interaction.isButton()) {
         const guildId = interaction.guildId;
         if (!guildId) return;
 
@@ -419,14 +430,13 @@ if (interaction.isButton()) {
       await ensureWorkspace(guildId);
 
       if (interaction.commandName === "page-list") {
-        // Reply immediately so Discord never stays "thinking"
-        await interaction.reply(ephemeralPayload({ content: "Loading pages…" })).catch(() => {});
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const search = interaction.options.getString("search") ?? "";
         return runPageList(interaction, guildId, search, 1);
       }
 
       if (interaction.commandName === "page-open") {
-        await interaction.reply(ephemeralPayload({ content: "Loading page…" })).catch(() => {});
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const query = interaction.options.getString("query", true);
         const page = await findPageByQuery(guildId, query);
         if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
@@ -436,7 +446,7 @@ if (interaction.isButton()) {
       }
 
       if (interaction.commandName === "page-create") {
-        await interaction.reply(ephemeralPayload({ content: "Creating…" })).catch(() => {});
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const title = interaction.options.getString("title", true);
         const content = interaction.options.getString("content") ?? "";
         const slug = slugify(title) || "page";
